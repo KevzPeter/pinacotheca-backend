@@ -14,7 +14,75 @@ const LEX_LOCALE_ID = process.env.LEX_LOCALE_ID || "en_US";
 // v3 Lex client – uses Lambda's IAM role + region by default
 const lexClient = new LexRuntimeV2Client({});
 
-// Call Lex RecognizeText and extract keywords from the Keywords slot
+// Simple helper for consistent CORS responses
+function makeResponse(statusCode, bodyObj) {
+    return {
+        statusCode,
+        headers: {
+            "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Headers": "Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token,x-api-key",
+            "Access-Control-Allow-Methods": "GET,OPTIONS"
+        },
+        body: JSON.stringify(bodyObj)
+    };
+}
+
+// Expand simple singular / plural variants for better matching
+function expandSingularPlural(words) {
+    const out = new Set();
+
+    for (const wRaw of words || []) {
+        if (!wRaw) continue;
+        const w = wRaw.toLowerCase().trim();
+        if (!w) continue;
+
+        // always include the original
+        out.add(w);
+
+        // plural -> singular
+        if (w.endsWith("ies") && w.length > 3) {
+            // babies -> baby
+            out.add(w.slice(0, -3) + "y");
+        } else if (w.endsWith("es") && w.length > 3) {
+            // buses -> bus (naive)
+            out.add(w.slice(0, -2));
+        } else if (w.endsWith("s") && w.length > 3) {
+            // cats -> cat
+            out.add(w.slice(0, -1));
+        }
+
+        // singular -> plural
+        if (!w.endsWith("s")) {
+            if (w.endsWith("y") && w.length > 1) {
+                // baby -> babies
+                out.add(w.slice(0, -1) + "ies");
+            }
+            // cat -> cats
+            out.add(w + "s");
+        }
+    }
+
+    return Array.from(out);
+}
+
+// Helper to normalize a raw slot string into tokens
+function tokenizeSlotValue(raw) {
+    if (!raw) return [];
+    const lowered = raw.toLowerCase();
+
+    return Array.from(
+        new Set(
+            lowered
+                .replace(/\band\b/g, " ")
+                .split(/[,\s]+/)
+                .map(s => s.trim())
+                .filter(s => s.length > 0)
+        )
+    );
+}
+
+// Call Lex RecognizeText and extract keywords from keyword1 / keyword2 slots
 async function getKeywordsFromLex(queryText) {
     if (!LEX_BOT_ID || !LEX_BOT_ALIAS_ID) {
         throw new Error("Lex bot environment variables not set");
@@ -29,31 +97,52 @@ async function getKeywordsFromLex(queryText) {
     };
 
     const resp = await lexClient.send(new RecognizeTextCommand(params));
-    console.log(`INTENT NAME ====> ${resp.sessionState.intent.name}`);
+    console.log("Lex full response:", JSON.stringify(resp));
     const intent = resp.sessionState && resp.sessionState.intent;
+    console.log(`INTENT NAME ====> ${intent && intent.name}`);
+
     if (!intent || intent.name !== "SearchIntent") {
         return [];
     }
 
     const slots = intent.slots || {};
-    const keywordSlot = slots.keyword;
-    if (!keywordSlot || !keywordSlot.value || !keywordSlot.value.interpretedValue) {
-        return [];
+    const collected = [];
+
+    // New slots: keyword1 and keyword2
+    const slotNames = ["keyword1", "keyword2"];
+
+    for (const name of slotNames) {
+        const slot = slots[name];
+        if (!slot || !slot.value) continue;
+
+        const v =
+            slot.value.interpretedValue ||
+            (Array.isArray(slot.value.resolvedValues) && slot.value.resolvedValues[0]) ||
+            slot.value.originalValue;
+
+        if (v && v.trim().length > 0) {
+            const tokens = tokenizeSlotValue(v);
+            collected.push(...tokens);
+        }
     }
 
-    const raw = keywordSlot.value.interpretedValue.toLowerCase();
+    // Backward compatibility: if you still have a single slot named "keyword"
+    if (collected.length === 0 && slots.keyword && slots.keyword.value) {
+        const v =
+            slots.keyword.value.interpretedValue ||
+            (Array.isArray(slots.keyword.value.resolvedValues) &&
+                slots.keyword.value.resolvedValues[0]) ||
+            slots.keyword.value.originalValue;
 
-    // Very simple keyword extraction:
-    // - remove "and"
-    // - split on spaces/commas
-    // - trim and deduplicate
-    const parts = raw
-        .replace(/\band\b/g, " ")
-        .split(/[,\s]+/)
-        .map(s => s.trim())
-        .filter(s => s.length > 0);
+        if (v && v.trim().length > 0) {
+            const tokens = tokenizeSlotValue(v);
+            collected.push(...tokens);
+        }
+    }
 
-    return Array.from(new Set(parts));
+    const unique = Array.from(new Set(collected));
+    console.log("Lex raw keywords (unique):", unique);
+    return unique;
 }
 
 // Query OpenSearch for any of the keywords in the labels field
@@ -71,8 +160,15 @@ function searchOpenSearch(keywords) {
 
         const body = JSON.stringify({
             query: {
-                terms: {
-                    labels: keywords
+                bool: {
+                    should: [
+                        {
+                            terms: {
+                                labels: keywords
+                            }
+                        }
+                    ],
+                    minimum_should_match: 1
                 }
             }
         });
@@ -138,36 +234,27 @@ exports.handler = async (event) => {
             "";
 
         if (!q || q.trim().length === 0) {
-            return {
-                statusCode: 200,
-                headers: {
-                    "Content-Type": "application/json",
-                    "Access-Control-Allow-Origin": "*",
-                    "Access-Control-Allow-Headers": "Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token,x-api-key",
-                    "Access-Control-Allow-Methods": "GET,OPTIONS"
-                },
-                body: JSON.stringify([])
-            };
+            return makeResponse(200, []);
         }
 
         const queryText = q.trim();
         console.log("Search query:", queryText);
 
-        // 1. Get keywords from Lex
-        const keywords = await getKeywordsFromLex(queryText);
-        console.log("Extracted keywords:", keywords);
+        // 1. Get raw keywords from Lex (keyword1 / keyword2)
+        const rawKeywords = await getKeywordsFromLex(queryText);
+        console.log("Extracted keywords from Lex:", rawKeywords);
 
-        if (!keywords || keywords.length === 0) {
+        // Expand to include simple singular / plural variants
+        const searchTerms = expandSingularPlural(rawKeywords);
+        console.log("Search terms after singular/plural expansion:", searchTerms);
+
+        if (!searchTerms || searchTerms.length === 0) {
             // Assignment requirement: empty array if no keywords
-            return {
-                statusCode: 200,
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify([])
-            };
+            return makeResponse(200, []);
         }
 
         // 2. Search OpenSearch
-        const hits = await searchOpenSearch(keywords);
+        const hits = await searchOpenSearch(searchTerms);
 
         // 3. Map hits to simple JSON objects
         const results = hits.map(h => {
@@ -184,31 +271,14 @@ exports.handler = async (event) => {
                     : null
             };
         });
-        return {
-            statusCode: 200,
-            headers: {
-                "Content-Type": "application/json",
-                "Access-Control-Allow-Origin": "*",
-                "Access-Control-Allow-Headers": "Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token,x-api-key",
-                "Access-Control-Allow-Methods": "GET,OPTIONS"
-            },
-            body: JSON.stringify(results)
-        };
+
+        return makeResponse(200, results);
     } catch (err) {
         console.error("Error in search-photos:", err);
 
-        return {
-            statusCode: 500,
-            headers: {
-                "Content-Type": "application/json",
-                "Access-Control-Allow-Origin": "*",
-                "Access-Control-Allow-Headers": "Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token,x-api-key",
-                "Access-Control-Allow-Methods": "GET,OPTIONS"
-            },
-            body: JSON.stringify({
-                message: "Internal server error",
-                error: err.message
-            })
-        };
+        return makeResponse(500, {
+            message: "Internal server error",
+            error: err.message
+        });
     }
 };
