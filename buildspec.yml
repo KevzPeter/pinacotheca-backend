@@ -1,0 +1,28 @@
+version: 0.2
+
+phases:
+  install:
+    commands:
+      - echo "Install phase - nothing to install yet"
+  pre_build:
+    commands:
+      - echo "Pre-build phase"
+  build:
+    commands:
+      - echo "Zipping Lambda functions"
+      - cd lf1
+      - zip -r ../lf1.zip .
+      - cd ../lf2
+      - zip -r ../lf2.zip .
+      - cd ..
+  post_build:
+    commands:
+      - echo "Updating Lambda function LF1-index-photos"
+      - aws lambda update-function-code --function-name LF1-index-photos --zip-file fileb://lf1.zip
+      - echo "Updating Lambda function search-photos"
+      - aws lambda update-function-code --function-name LF2-search-photos --zip-file fileb://lf2.zip
+
+artifacts:
+  files:
+    - lf1.zip
+    - lf2.zip
