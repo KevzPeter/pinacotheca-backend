@@ -3,7 +3,6 @@ const { RekognitionClient, DetectLabelsCommand } = require("@aws-sdk/client-reko
 const https = require("https");
 const { URL } = require("url");
 
-// v3 clients - no config needed if using Lambda's IAM role/region defaults
 const s3 = new S3Client({});
 const rekognition = new RekognitionClient({});
 
@@ -12,7 +11,7 @@ const OPENSEARCH_INDEX = process.env.OPENSEARCH_INDEX || 'photos';
 const OPENSEARCH_USERNAME = process.env.OPENSEARCH_USERNAME;
 const OPENSEARCH_PASSWORD = process.env.OPENSEARCH_PASSWORD;
 
-// Helper: HTTP POST with Basic Auth to OpenSearch
+// HTTP POST to OpenSearch
 function indexDocumentToOpenSearch(doc) {
     return new Promise((resolve, reject) => {
         if (!OPENSEARCH_ENDPOINT) {
@@ -67,11 +66,10 @@ function indexDocumentToOpenSearch(doc) {
     });
 }
 
-// Helper: parse custom labels from S3 object metadata
+// parse custom labels from S3 object metadata
 function extractCustomLabelsFromMetadata(metadata) {
     if (!metadata) return [];
 
-    // S3 lowercases user-defined metadata keys
     const raw = metadata['customlabels'] || metadata['custom-labels'];
     if (!raw) return [];
 
@@ -84,7 +82,7 @@ function extractCustomLabelsFromMetadata(metadata) {
 exports.handler = async (event) => {
     console.log('Received S3 event:', JSON.stringify(event, null, 2));
 
-    // Handle potentially multiple records in one event
+    // handle potentially multiple records in one event
     const records = event.Records || [];
 
     const results = [];
@@ -99,7 +97,7 @@ exports.handler = async (event) => {
         console.log(`Processing object: s3://${bucket}/${key}`);
 
         try {
-            // 1. Detect labels with Rekognition
+            // detect labels with Rekognition
             const detectParams = {
                 Image: {
                     S3Object: {
@@ -122,7 +120,7 @@ exports.handler = async (event) => {
 
             console.log('Rekognition labels:', rekognitionLabels);
 
-            // 2. Read S3 object metadata for custom labels
+            // read S3 object metadata for custom labels
             const headResp = await s3.send(
                 new HeadObjectCommand({ Bucket: bucket, Key: key })
             );
@@ -134,7 +132,7 @@ exports.handler = async (event) => {
 
             console.log('Custom labels:', customLabels);
 
-            // 3. Merge and de-duplicate labels
+            // merge and de-duplicate labels
             const mergedLabels = Array.from(
                 new Set([
                     ...rekognitionLabels,
@@ -142,7 +140,7 @@ exports.handler = async (event) => {
                 ])
             );
 
-            // 4. Build document to index
+            // build document to index
             const doc = {
                 objectKey: key,
                 bucket,
@@ -152,7 +150,7 @@ exports.handler = async (event) => {
 
             console.log('Indexing document:', JSON.stringify(doc));
 
-            // 5. Index into OpenSearch
+            // index into OpenSearch
             const resp = await indexDocumentToOpenSearch(doc);
             console.log('OpenSearch response:', resp);
 

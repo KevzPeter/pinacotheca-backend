@@ -11,10 +11,9 @@ const LEX_BOT_ID = process.env.LEX_BOT_ID;
 const LEX_BOT_ALIAS_ID = process.env.LEX_BOT_ALIAS_ID;
 const LEX_LOCALE_ID = process.env.LEX_LOCALE_ID || "en_US";
 
-// v3 Lex client – uses Lambda's IAM role + region by default
 const lexClient = new LexRuntimeV2Client({});
 
-// Simple helper for consistent CORS responses
+//  helper for CORS responses
 function makeResponse(statusCode, bodyObj) {
     return {
         statusCode,
@@ -28,7 +27,7 @@ function makeResponse(statusCode, bodyObj) {
     };
 }
 
-// Expand simple singular / plural variants for better matching
+// expand simple singular / plural variants for better matching
 function expandSingularPlural(words) {
     const out = new Set();
 
@@ -36,8 +35,6 @@ function expandSingularPlural(words) {
         if (!wRaw) continue;
         const w = wRaw.toLowerCase().trim();
         if (!w) continue;
-
-        // always include the original
         out.add(w);
 
         // plural -> singular
@@ -66,7 +63,7 @@ function expandSingularPlural(words) {
     return Array.from(out);
 }
 
-// Helper to normalize a raw slot string into tokens
+// normalize a raw slot string into tokens
 function tokenizeSlotValue(raw) {
     if (!raw) return [];
     const lowered = raw.toLowerCase();
@@ -82,7 +79,7 @@ function tokenizeSlotValue(raw) {
     );
 }
 
-// Call Lex RecognizeText and extract keywords from keyword1 / keyword2 slots
+// call Lex RecognizeText and extract keywords from keyword1 / keyword2 slots
 async function getKeywordsFromLex(queryText) {
     if (!LEX_BOT_ID || !LEX_BOT_ALIAS_ID) {
         throw new Error("Lex bot environment variables not set");
@@ -92,7 +89,7 @@ async function getKeywordsFromLex(queryText) {
         botId: LEX_BOT_ID,
         botAliasId: LEX_BOT_ALIAS_ID,
         localeId: LEX_LOCALE_ID,
-        sessionId: "photos-session", // can be any identifier
+        sessionId: "photos-session",
         text: queryText
     };
 
@@ -107,8 +104,6 @@ async function getKeywordsFromLex(queryText) {
 
     const slots = intent.slots || {};
     const collected = [];
-
-    // New slots: keyword1 and keyword2
     const slotNames = ["keyword1", "keyword2"];
 
     for (const name of slotNames) {
@@ -126,7 +121,6 @@ async function getKeywordsFromLex(queryText) {
         }
     }
 
-    // Backward compatibility: if you still have a single slot named "keyword"
     if (collected.length === 0 && slots.keyword && slots.keyword.value) {
         const v =
             slots.keyword.value.interpretedValue ||
@@ -145,7 +139,7 @@ async function getKeywordsFromLex(queryText) {
     return unique;
 }
 
-// Query OpenSearch for any of the keywords in the labels field
+// query OpenSearch for any of the keywords in the labels field
 function searchOpenSearch(keywords) {
     return new Promise((resolve, reject) => {
         if (!OPENSEARCH_ENDPOINT) {
@@ -227,7 +221,6 @@ exports.handler = async (event) => {
     try {
         console.log("Incoming event:", JSON.stringify(event));
 
-        // For API Gateway proxy: /search?q=...
         const q =
             (event.queryStringParameters && event.queryStringParameters.q) ||
             event.q ||
@@ -240,23 +233,20 @@ exports.handler = async (event) => {
         const queryText = q.trim();
         console.log("Search query:", queryText);
 
-        // 1. Get raw keywords from Lex (keyword1 / keyword2)
+        // get raw keywords from Lex (keyword1 / keyword2)
         const rawKeywords = await getKeywordsFromLex(queryText);
         console.log("Extracted keywords from Lex:", rawKeywords);
 
-        // Expand to include simple singular / plural variants
+        // expand to include simple singular / plural variants
         const searchTerms = expandSingularPlural(rawKeywords);
         console.log("Search terms after singular/plural expansion:", searchTerms);
 
         if (!searchTerms || searchTerms.length === 0) {
-            // Assignment requirement: empty array if no keywords
             return makeResponse(200, []);
         }
 
-        // 2. Search OpenSearch
         const hits = await searchOpenSearch(searchTerms);
 
-        // 3. Map hits to simple JSON objects
         const results = hits.map(h => {
             const src = h._source || {};
             const bucket = src.bucket;
