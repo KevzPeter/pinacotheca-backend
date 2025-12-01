@@ -3,7 +3,7 @@ const { RekognitionClient, DetectLabelsCommand } = require("@aws-sdk/client-reko
 const https = require("https");
 const { URL } = require("url");
 
-// v3 clients – no config needed if using Lambda's IAM role/region defaults
+// v3 clients - no config needed if using Lambda's IAM role/region defaults
 const s3 = new S3Client({});
 const rekognition = new RekognitionClient({});
 
